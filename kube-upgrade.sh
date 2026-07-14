@@ -34,6 +34,7 @@ NODE=""
 K8S_VERSION=""
 CONTAINERD_UPGRADE="false"
 CONTAINERD_VERSION=""
+CONTAINERD_PACKAGE="auto"
 ROLE="auto"
 SSH_USER=""
 DRY_RUN="false"
@@ -53,8 +54,12 @@ At least one of the following must be given:
   --containerd-upgrade true    Together with --containerd-version, upgrades containerd
 
 Options:
-  --containerd-upgrade <bool>  Also upgrade containerd.io (default: false)
-  --containerd-version <ver>   containerd.io package version (required if --containerd-upgrade true)
+  --containerd-upgrade <bool>  Also upgrade containerd (default: false)
+  --containerd-version <ver>   containerd package version (required if --containerd-upgrade true)
+  --containerd-package <auto|containerd|containerd.io>
+                                containerd package name (default: auto, detected from the
+                                package currently installed on the node — Ubuntu's own repo
+                                uses "containerd", Docker's repo uses "containerd.io")
   --role <auto|primary-control|secondary-control|worker>
                                 Override node-role detection (default: auto, inferred from node name)
   --ssh-user <user>             SSH user to connect as (default: current user / ssh config)
@@ -82,6 +87,7 @@ while [[ $# -gt 0 ]]; do
         --version) K8S_VERSION="$2"; shift 2 ;;
         --containerd-upgrade) CONTAINERD_UPGRADE="$2"; shift 2 ;;
         --containerd-version) CONTAINERD_VERSION="$2"; shift 2 ;;
+        --containerd-package) CONTAINERD_PACKAGE="$2"; shift 2 ;;
         --role) ROLE="$2"; shift 2 ;;
         --ssh-user) SSH_USER="$2"; shift 2 ;;
         --dry-run) DRY_RUN="true"; shift ;;
@@ -113,6 +119,11 @@ fi
 
 if [[ "$CONTAINERD_UPGRADE" == "true" && -z "$CONTAINERD_VERSION" ]]; then
     echo "ERROR: --containerd-version is required when --containerd-upgrade true" >&2
+    exit 1
+fi
+
+if [[ "$CONTAINERD_PACKAGE" != "auto" && "$CONTAINERD_PACKAGE" != "containerd" && "$CONTAINERD_PACKAGE" != "containerd.io" ]]; then
+    echo "ERROR: --containerd-package must be one of auto|containerd|containerd.io" >&2
     exit 1
 fi
 
@@ -310,9 +321,19 @@ fi
 # 8. Optional containerd upgrade
 # ---------------------------------------------------------------------------
 if [[ "$CONTAINERD_UPGRADE" == "true" ]]; then
-    log "Upgrading containerd.io to $CONTAINERD_VERSION..."
+    if [[ "$CONTAINERD_PACKAGE" == "auto" ]]; then
+        log "Detecting installed containerd package name..."
+        RESOLVED_CONTAINERD_PKG="$(run_remote_capture "if dpkg -s containerd.io >/dev/null 2>&1; then echo containerd.io; elif dpkg -s containerd >/dev/null 2>&1; then echo containerd; fi")"
+        if [[ "$DRY_RUN" != "true" && -z "$RESOLVED_CONTAINERD_PKG" ]]; then
+            die "Could not detect an installed containerd/containerd.io package on $NODE. Re-run with --containerd-package <containerd|containerd.io> to specify it explicitly."
+        fi
+        [[ "$DRY_RUN" == "true" ]] && RESOLVED_CONTAINERD_PKG="containerd.io"
+    else
+        RESOLVED_CONTAINERD_PKG="$CONTAINERD_PACKAGE"
+    fi
+    log "Upgrading $RESOLVED_CONTAINERD_PKG to $CONTAINERD_VERSION..."
     run_remote "sudo apt-get update -qq"
-    run_remote "sudo apt-get install -y containerd.io=${CONTAINERD_VERSION}"
+    run_remote "sudo apt-get install -y ${RESOLVED_CONTAINERD_PKG}=${CONTAINERD_VERSION}"
     run_remote "sudo systemctl daemon-reload"
     run_remote "sudo systemctl restart containerd"
     run_remote "containerd --version"

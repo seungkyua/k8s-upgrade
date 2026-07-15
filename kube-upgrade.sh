@@ -298,12 +298,22 @@ if [[ -n "$K8S_VERSION" ]]; then
     apt_install "kubeadm=${FULL_PKG_VERSION}"
     run_remote "sudo apt-mark hold kubeadm"
 
+    # dpkg always installs kubeadm at /usr/bin/kubeadm. Invoke it by that
+    # absolute path (instead of relying on $PATH) so we never accidentally
+    # run a stale kubeadm binary that happens to sit earlier in sudo's
+    # secure_path (e.g. /usr/local/bin, common on Kubespray-provisioned nodes).
+    KUBEADM_BIN="/usr/bin/kubeadm"
+    ACTUAL_KUBEADM_VER="$(run_remote_capture "${KUBEADM_BIN} version -o short 2>/dev/null")"
+    if [[ "$DRY_RUN" != "true" && "$ACTUAL_KUBEADM_VER" != "v${KUBE_SEMVER}" ]]; then
+        die "apt installed kubeadm ${FULL_PKG_VERSION}, but ${KUBEADM_BIN} reports '${ACTUAL_KUBEADM_VER}'. Check for a stale kubeadm binary elsewhere on \$PATH (e.g. /usr/local/bin) shadowing the apt-managed one."
+    fi
+
     # -----------------------------------------------------------------------
     # 4. Show upgrade plan (control-plane nodes only, informational)
     # -----------------------------------------------------------------------
     if [[ "$IS_CONTROL" == "true" ]]; then
         log "Running 'kubeadm upgrade plan' (informational)..."
-        run_remote "sudo kubeadm upgrade plan${IGNORE_PREFLIGHT_FLAG}" || warn "kubeadm upgrade plan returned non-zero; continuing."
+        run_remote "sudo ${KUBEADM_BIN} upgrade plan${IGNORE_PREFLIGHT_FLAG}" || warn "kubeadm upgrade plan returned non-zero; continuing."
     fi
 
     # -----------------------------------------------------------------------
@@ -315,18 +325,18 @@ if [[ -n "$K8S_VERSION" ]]; then
             run_remote "sudo killall -s SIGTERM kube-apiserver" || true
             wait_for_apiserver
             log "Running 'kubeadm upgrade apply v${KUBE_SEMVER} --certificate-renewal=false'..."
-            run_remote "sudo kubeadm upgrade apply v${KUBE_SEMVER} --certificate-renewal=false -y${IGNORE_PREFLIGHT_FLAG}"
+            run_remote "sudo ${KUBEADM_BIN} upgrade apply v${KUBE_SEMVER} --certificate-renewal=false -y${IGNORE_PREFLIGHT_FLAG}"
             ;;
         secondary-control)
             log "Stopping kube-apiserver for in-place upgrade..."
             run_remote "sudo killall -s SIGTERM kube-apiserver" || true
             wait_for_apiserver
             log "Running 'kubeadm upgrade node --certificate-renewal=false'..."
-            run_remote "sudo kubeadm upgrade node --certificate-renewal=false${IGNORE_PREFLIGHT_FLAG}"
+            run_remote "sudo ${KUBEADM_BIN} upgrade node --certificate-renewal=false${IGNORE_PREFLIGHT_FLAG}"
             ;;
         worker)
             log "Running 'kubeadm upgrade node --certificate-renewal=false'..."
-            run_remote "sudo kubeadm upgrade node --certificate-renewal=false${IGNORE_PREFLIGHT_FLAG}"
+            run_remote "sudo ${KUBEADM_BIN} upgrade node --certificate-renewal=false${IGNORE_PREFLIGHT_FLAG}"
             ;;
     esac
 else

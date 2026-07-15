@@ -179,6 +179,40 @@ run_kubectl() {
     kubectl "$@"
 }
 
+# apt-get install on the target node, with needrestart's automatic service
+# restarts suppressed — otherwise it can silently bounce containerd (and every
+# container it runs, including etcd/kube-apiserver) during an unrelated
+# package install, which is a common cause of "connection refused" mid-upgrade.
+apt_install() {
+    run_remote "sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y $1"
+}
+
+# poll the target node's kube-apiserver until it responds again (any HTTP
+# status counts — we only care that something is listening on :6443), or
+# give up after max_wait seconds.
+wait_for_apiserver() {
+    local max_wait=180
+    local interval=5
+    local waited=0
+
+    log "Waiting for kube-apiserver on $NODE to come back up (timeout: ${max_wait}s)..."
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo "  [dry-run][ssh $SSH_TARGET] wait for https://127.0.0.1:6443/livez to respond (timeout: ${max_wait}s)"
+        return 0
+    fi
+
+    while (( waited < max_wait )); do
+        if ssh -o BatchMode=yes "$SSH_TARGET" "curl -sk -o /dev/null -m 3 https://127.0.0.1:6443/livez"; then
+            log "kube-apiserver is responding again (after ${waited}s)."
+            return 0
+        fi
+        sleep "$interval"
+        waited=$((waited + interval))
+    done
+
+    die "kube-apiserver on $NODE did not come back up within ${max_wait}s. Aborting."
+}
+
 # ---------------------------------------------------------------------------
 # Role detection
 # ---------------------------------------------------------------------------
@@ -251,7 +285,7 @@ if [[ -n "$K8S_VERSION" ]]; then
     # -----------------------------------------------------------------------
     log "Upgrading kubeadm to $FULL_PKG_VERSION..."
     run_remote "sudo apt-mark unhold kubeadm"
-    run_remote "sudo apt-get install -y kubeadm=${FULL_PKG_VERSION}"
+    apt_install "kubeadm=${FULL_PKG_VERSION}"
     run_remote "sudo apt-mark hold kubeadm"
 
     # -----------------------------------------------------------------------
@@ -269,14 +303,14 @@ if [[ -n "$K8S_VERSION" ]]; then
         primary-control)
             log "Stopping kube-apiserver for in-place upgrade..."
             run_remote "sudo killall -s SIGTERM kube-apiserver" || true
-            run_remote "sleep 60"
+            wait_for_apiserver
             log "Running 'kubeadm upgrade apply v${KUBE_SEMVER} --certificate-renewal=false'..."
             run_remote "sudo kubeadm upgrade apply v${KUBE_SEMVER} --certificate-renewal=false -y"
             ;;
         secondary-control)
             log "Stopping kube-apiserver for in-place upgrade..."
             run_remote "sudo killall -s SIGTERM kube-apiserver" || true
-            run_remote "sleep 60"
+            wait_for_apiserver
             log "Running 'kubeadm upgrade node --certificate-renewal=false'..."
             run_remote "sudo kubeadm upgrade node --certificate-renewal=false"
             ;;
@@ -304,12 +338,12 @@ if [[ -n "$K8S_VERSION" ]]; then
     if [[ "$IS_CONTROL" == "true" ]]; then
         log "Upgrading kubelet and kubectl to $FULL_PKG_VERSION..."
         run_remote "sudo apt-mark unhold kubelet kubectl"
-        run_remote "sudo apt-get install -y kubelet=${FULL_PKG_VERSION} kubectl=${FULL_PKG_VERSION}"
+        apt_install "kubelet=${FULL_PKG_VERSION} kubectl=${FULL_PKG_VERSION}"
         run_remote "sudo apt-mark hold kubelet kubectl"
     else
         log "Upgrading kubelet to $FULL_PKG_VERSION..."
         run_remote "sudo apt-mark unhold kubelet"
-        run_remote "sudo apt-get install -y kubelet=${FULL_PKG_VERSION}"
+        apt_install "kubelet=${FULL_PKG_VERSION}"
         run_remote "sudo apt-mark hold kubelet"
     fi
 
@@ -333,7 +367,7 @@ if [[ "$CONTAINERD_UPGRADE" == "true" ]]; then
     fi
     log "Upgrading $RESOLVED_CONTAINERD_PKG to $CONTAINERD_VERSION..."
     run_remote "sudo apt-get update -qq"
-    run_remote "sudo apt-get install -y ${RESOLVED_CONTAINERD_PKG}=${CONTAINERD_VERSION}"
+    apt_install "${RESOLVED_CONTAINERD_PKG}=${CONTAINERD_VERSION}"
     run_remote "sudo systemctl daemon-reload"
     run_remote "sudo systemctl restart containerd"
     run_remote "containerd --version"

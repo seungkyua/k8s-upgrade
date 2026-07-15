@@ -39,6 +39,7 @@ ROLE="auto"
 SSH_USER=""
 DRY_RUN="false"
 ASSUME_YES="false"
+IGNORE_PREFLIGHT_ERRORS="CreateJob"
 
 usage() {
     cat <<EOF
@@ -63,6 +64,11 @@ Options:
   --role <auto|primary-control|secondary-control|worker>
                                 Override node-role detection (default: auto, inferred from node name)
   --ssh-user <user>             SSH user to connect as (default: current user / ssh config)
+  --ignore-preflight-errors <list>
+                                Comma-separated list passed to kubeadm's --ignore-preflight-errors
+                                on 'upgrade plan/apply/node' (default: CreateJob — kubeadm's
+                                pre-upgrade health-check Job commonly times out even on healthy
+                                clusters; pass "" to disable and let kubeadm fail fatally instead)
   --dry-run                     Print remote/kubectl commands without executing them
   --yes                         Skip the confirmation prompt
   -h, --help                    Show this help
@@ -90,6 +96,7 @@ while [[ $# -gt 0 ]]; do
         --containerd-package) CONTAINERD_PACKAGE="$2"; shift 2 ;;
         --role) ROLE="$2"; shift 2 ;;
         --ssh-user) SSH_USER="$2"; shift 2 ;;
+        --ignore-preflight-errors) IGNORE_PREFLIGHT_ERRORS="$2"; shift 2 ;;
         --dry-run) DRY_RUN="true"; shift ;;
         --yes) ASSUME_YES="true"; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -140,6 +147,9 @@ fi
 
 SSH_TARGET="$NODE"
 [[ -n "$SSH_USER" ]] && SSH_TARGET="${SSH_USER}@${NODE}"
+
+IGNORE_PREFLIGHT_FLAG=""
+[[ -n "$IGNORE_PREFLIGHT_ERRORS" ]] && IGNORE_PREFLIGHT_FLAG=" --ignore-preflight-errors=${IGNORE_PREFLIGHT_ERRORS}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -293,7 +303,7 @@ if [[ -n "$K8S_VERSION" ]]; then
     # -----------------------------------------------------------------------
     if [[ "$IS_CONTROL" == "true" ]]; then
         log "Running 'kubeadm upgrade plan' (informational)..."
-        run_remote "sudo kubeadm upgrade plan" || warn "kubeadm upgrade plan returned non-zero; continuing."
+        run_remote "sudo kubeadm upgrade plan${IGNORE_PREFLIGHT_FLAG}" || warn "kubeadm upgrade plan returned non-zero; continuing."
     fi
 
     # -----------------------------------------------------------------------
@@ -305,18 +315,18 @@ if [[ -n "$K8S_VERSION" ]]; then
             run_remote "sudo killall -s SIGTERM kube-apiserver" || true
             wait_for_apiserver
             log "Running 'kubeadm upgrade apply v${KUBE_SEMVER} --certificate-renewal=false'..."
-            run_remote "sudo kubeadm upgrade apply v${KUBE_SEMVER} --certificate-renewal=false -y"
+            run_remote "sudo kubeadm upgrade apply v${KUBE_SEMVER} --certificate-renewal=false -y${IGNORE_PREFLIGHT_FLAG}"
             ;;
         secondary-control)
             log "Stopping kube-apiserver for in-place upgrade..."
             run_remote "sudo killall -s SIGTERM kube-apiserver" || true
             wait_for_apiserver
             log "Running 'kubeadm upgrade node --certificate-renewal=false'..."
-            run_remote "sudo kubeadm upgrade node --certificate-renewal=false"
+            run_remote "sudo kubeadm upgrade node --certificate-renewal=false${IGNORE_PREFLIGHT_FLAG}"
             ;;
         worker)
             log "Running 'kubeadm upgrade node --certificate-renewal=false'..."
-            run_remote "sudo kubeadm upgrade node --certificate-renewal=false"
+            run_remote "sudo kubeadm upgrade node --certificate-renewal=false${IGNORE_PREFLIGHT_FLAG}"
             ;;
     esac
 else
